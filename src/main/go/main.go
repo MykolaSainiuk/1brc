@@ -9,12 +9,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
 	// CHUNK_SIZE_IN_BYTES int64 = int64(float32(0.45 * 1024 * 1024 * 1024)) // 450MB -> works ugly
 	CHUNK_SIZE_IN_BYTES int64 = int64(16 * 1024 * 1024) // 16MB
 	// NUM_OF_WORKERS      int   = 160
+	MAX_CITES_AMOUNT int = 1e5 // 100000
 )
 
 var pln = fmt.Println
@@ -25,6 +27,8 @@ type MapElem struct {
 	sum   float32
 	count int
 }
+
+var mergedMap sync.Map // map[string]MapElem
 
 func main() {
 	args := os.Args[1:]
@@ -46,56 +50,58 @@ func main() {
 	var chunkSize int = int(CHUNK_SIZE_IN_BYTES)
 	// var numberOfWorkers int = NUM_OF_WORKERS
 	// var chunkSize int = int(size / int64(numberOfWorkers))
-	
+
 	pln("numberOfWorkers:", numberOfWorkers)
-	// a channel of maps of partial parse results
-	var channel chan map[string]MapElem = make(chan map[string]MapElem, numberOfWorkers)
+
 	var firstErrChan chan error = make(chan error, 1)
+	var okChan chan struct{} = make(chan struct{}, numberOfWorkers)
 
 	var offset int64
 	for i := 0; i < numberOfWorkers; i++ {
 		offset = int64(i) * int64(chunkSize)
 
-		go parseFile(file, offset, chunkSize, channel, firstErrChan)
+		go parseFile(file, offset, chunkSize, okChan, firstErrChan)
 	}
 
-	var mergedMap map[string]MapElem = make(map[string]MapElem)
 	var i int = 0
 	for i < numberOfWorkers {
 		select {
-		case subMap := <-channel:
-			for k, v := range subMap {
-				el, ok := mergedMap[k]
-				if ok {
-					el.min = min(el.min, v.min)
-					el.max = max(el.max, v.max)
-					el.sum += v.sum
-					el.count += v.count
-				} else {
-					mergedMap[k] = v
-				}
-			}
+		case <-okChan:
+			i++
 		case err := <-firstErrChan:
 			file.Close()
 			log.Fatal(err)
 			return
 		}
-		i++
 	}
 
-	close(channel)
+	close(okChan)
+	close(firstErrChan)
 	file.Close()
 
 	// get sorted sortedKeys
-	var sortedKeys []string = make([]string, 0, len(mergedMap))
-	for k := range mergedMap {
-		sortedKeys = append(sortedKeys, k)
-	}
+	var sortedKeys []string // TODO: what len or cap?
+	mergedMap.Range(func(key, value any) bool {
+		sortedKeys = append(sortedKeys, key.(string))
+		return true
+	})
+	// for k := range mergedMap.Range() {
+	// 	sortedKeys = append(sortedKeys, k)
+	// }
 	sort.Strings(sortedKeys)
 
 	// print results
 	for _, k := range sortedKeys {
-		v := mergedMap[k]
+		_v, _ := mergedMap.Load(k)
+		// if !ok {
+		// 	log.Fatal("main: cannot load key: ", k)
+		// 	return
+		// }
+		v, _ := _v.(MapElem)
+		// if !ok {
+		// 	log.Fatal("main: cannot cast map el: ", k)
+		// 	return
+		// }
 		fmt.Printf("%s=%.1f/%.1f/%.1f, ", k, v.min, v.sum/float32(v.count), v.max)
 	}
 	pln()
@@ -117,7 +123,7 @@ func openFile(path string) (*os.File, int64, error) {
 	return file, fileInfo.Size(), nil
 }
 
-func parseFile(file *os.File, offset int64, chunkSize int, channel chan map[string]MapElem, errChan chan error) {
+func parseFile(file *os.File, offset int64, chunkSize int, okChan chan struct{}, errChan chan error) {
 	var err error
 	var buffer []byte = make([]byte, chunkSize)
 	var bytesRead int
@@ -131,8 +137,6 @@ func parseFile(file *os.File, offset int64, chunkSize int, channel chan map[stri
 		errChan <- errNothingToRead
 		return
 	}
-
-	var subMap map[string]MapElem = make(map[string]MapElem)
 
 	var content string = string(buffer[:bytesRead])
 	var lines []string = strings.Split(content, "\n")
@@ -162,21 +166,21 @@ func parseFile(file *os.File, offset int64, chunkSize int, channel chan map[stri
 			continue
 		}
 
-		processLine(subMap, lineParts[0], lineParts[1])
+		processLine(lineParts[0], lineParts[1])
 	}
 
 	if leftover != "" {
 		var lineParts []string = strings.Split(leftover, ";")
 		if len(lineParts) == 2 && lineParts[0] != "" && lineParts[1] != "" {
-			processLine(subMap, lineParts[0], lineParts[1])
+			processLine(lineParts[0], lineParts[1])
 		}
 		// TODO: BUG?
 	}
 
-	channel <- subMap
+	okChan <- struct{}{}
 }
 
-func processLine(subMap map[string]MapElem, key string, value string) {
+func processLine(key string, value string) {
 	var err error
 	var val float64
 	val, err = strconv.ParseFloat(value, 32)
@@ -187,20 +191,26 @@ func processLine(subMap map[string]MapElem, key string, value string) {
 	var fv float32 = float32(val)
 	var el MapElem
 	var ok bool
+	var _v any
 
-	el, ok = subMap[key]
+	_v, ok = mergedMap.Load(key)
 	if ok {
+		el, _ = _v.(MapElem)
+		// if !ok {
+		// 	log.Fatal("processLine: cannot cast map el: ", key)
+		// 	return
+		// }
 		el.min = min(el.min, fv)
 		el.max = max(el.max, fv)
 		el.sum += fv
 		el.count++
 	} else {
-		subMap[key] = MapElem{
+		mergedMap.Store(key, MapElem{
 			min:   fv,
 			max:   fv,
 			sum:   fv,
 			count: 1,
-		}
+		})
 	}
 }
 
