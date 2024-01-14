@@ -15,8 +15,8 @@ import (
 const (
 	// CHUNK_SIZE_IN_BYTES int64 = int64(float32(0.45 * 1024 * 1024 * 1024)) // 450MB -> works ugly
 	CHUNK_SIZE_IN_BYTES int64 = int64(16 * 1024 * 1024) // 16MB
-	// NUM_OF_WORKERS      int   = 160
-	MAX_CITES_AMOUNT int = 1e5 // 100000
+	NUM_OF_WORKERS      int   = 750
+	MAX_CITES_AMOUNT int = 1e4 // 10000
 )
 
 var pln = fmt.Println
@@ -46,37 +46,24 @@ func main() {
 		return
 	}
 
-	var numberOfWorkers int = int(size/CHUNK_SIZE_IN_BYTES) + 1
-	var chunkSize int = int(CHUNK_SIZE_IN_BYTES)
-	// var numberOfWorkers int = NUM_OF_WORKERS
-	// var chunkSize int = int(size / int64(numberOfWorkers))
+	// var numberOfWorkers int = int(size/CHUNK_SIZE_IN_BYTES) + 1
+	// var chunkSize int = int(CHUNK_SIZE_IN_BYTES)
+	var numberOfWorkers int = NUM_OF_WORKERS
+	var chunkSize int = int(size / int64(numberOfWorkers))
 
 	pln("numberOfWorkers:", numberOfWorkers)
 
-	var firstErrChan chan error = make(chan error, 1)
-	var okChan chan struct{} = make(chan struct{}, numberOfWorkers)
+	var wg sync.WaitGroup
+	wg.Add(numberOfWorkers)
 
 	var offset int64
 	for i := 0; i < numberOfWorkers; i++ {
 		offset = int64(i) * int64(chunkSize)
 
-		go parseFile(file, offset, chunkSize, okChan, firstErrChan)
+		go parseFile(file, offset, chunkSize, &wg)
 	}
 
-	var i int = 0
-	for i < numberOfWorkers {
-		select {
-		case <-okChan:
-			i++
-		case err := <-firstErrChan:
-			file.Close()
-			log.Fatal(err)
-			return
-		}
-	}
-
-	close(okChan)
-	close(firstErrChan)
+	wg.Wait()
 	file.Close()
 
 	// get sorted sortedKeys
@@ -123,18 +110,18 @@ func openFile(path string) (*os.File, int64, error) {
 	return file, fileInfo.Size(), nil
 }
 
-func parseFile(file *os.File, offset int64, chunkSize int, okChan chan struct{}, errChan chan error) {
+func parseFile(file *os.File, offset int64, chunkSize int, wg *sync.WaitGroup) {
 	var err error
 	var buffer []byte = make([]byte, chunkSize)
 	var bytesRead int
 
 	bytesRead, err = file.ReadAt(buffer, offset)
 	if err != nil && err != io.EOF {
-		errChan <- err
+		wg.Done()
 		return
 	}
 	if bytesRead == 0 {
-		errChan <- errNothingToRead
+		wg.Done()
 		return
 	}
 
@@ -177,7 +164,7 @@ func parseFile(file *os.File, offset int64, chunkSize int, okChan chan struct{},
 		// TODO: BUG?
 	}
 
-	okChan <- struct{}{}
+	wg.Done()
 }
 
 func processLine(key string, value string) {
@@ -193,23 +180,27 @@ func processLine(key string, value string) {
 	var ok bool
 	var _v any
 
-	_v, ok = mergedMap.Load(key)
+	_v, ok = mergedMap.LoadOrStore(key, MapElem{
+		min:   fv,
+		max:   fv,
+		sum:   fv,
+		count: 1,
+	})
 	if ok {
 		el, _ = _v.(MapElem)
 		// if !ok {
 		// 	log.Fatal("processLine: cannot cast map el: ", key)
 		// 	return
 		// }
-		el.min = min(el.min, fv)
-		el.max = max(el.max, fv)
-		el.sum += fv
-		el.count++
-	} else {
+		// el.min = min(el.min, fv)
+		// el.max = max(el.max, fv)
+		// el.sum += fv
+		// el.count++
 		mergedMap.Store(key, MapElem{
-			min:   fv,
-			max:   fv,
-			sum:   fv,
-			count: 1,
+			min:   min(el.min, fv),
+			max:   max(el.max, fv),
+			sum:   el.sum + fv,
+			count: el.count + 1,
 		})
 	}
 }
@@ -217,5 +208,5 @@ func processLine(key string, value string) {
 var (
 	errorCannotOpenFileToRead    = errors.New("cannot open file to read")
 	errorCannotFetchFileMetadata = errors.New("cannot read file metadata")
-	errNothingToRead             = errors.New("nothing left to read")
+	// errNothingToRead             = errors.New("nothing left to read")
 )
