@@ -4,14 +4,18 @@ import { close } from 'node:fs';
 
 const fileName = process.argv[2];
 
-const chunkSize = ~~(0.45 * 1024 * 1024 * 1024); // 0.45 bcz must be less than 0x1fffffe8
-const maxOldGenerationSizeMb = ~~(~~(chunkSize / 1024 / 1024) * 1.5);
+// const chunkSize = ~~(0.45 * 1024 * 1024 * 1024); // 0.45 bcz must be less than 0x1fffffe8
+// const maxOldGenerationSizeMb = ~~(~~(chunkSize / 1024 / 1024) * 1.5);
 
 const fh = await open(fileName, 'r');
 const fileStat = await fh.stat();
-const numberOfWorkers = ~~(fileStat.size / chunkSize) + 1;
+// const numberOfWorkers = ~~(fileStat.size / chunkSize) + 1;
+
+const numberOfWorkers = 16;
+const chunkSize = ~~(fileStat.size / numberOfWorkers) + 1;
+const maxOldGenerationSizeMb = ~~(~~(chunkSize / 1024 / 1024) * 1.5);
+
 console.debug('numberOfWorkers', numberOfWorkers);
-// const numberOfWorkers = 13;
 
 // Main Thread
 
@@ -36,41 +40,33 @@ for (let i = 0; i < numberOfWorkers; i++) {
     workers.push(worker);
 }
 
-const subMaps = await Promise.all(
+const mergeMap = new Map();
+await Promise.all(
     workers.map(
-        (w) =>
+        (worker) =>
             new Promise((resolve) =>
-                w.once('message', (subMap) => resolve(subMap)),
+                worker.once('message', (subMap) => {
+                    for (const [key, val] of subMap) {
+                        const subMapItem = subMap.get(key);
+                        if (!subMapItem) {
+                            mergeMap.set(key, subMapItem);
+                        } else {
+                            mergeMap.set(key, {
+                                min: Math.min(val.min, subMapItem.min),
+                                max: Math.max(val.max, subMapItem.max),
+                                sum: val.sum + subMapItem.sum,
+                                total: val.total + subMapItem.total,
+                            });
+                        }
+                    }
+                    resolve();
+                }),
             ),
     ),
 );
 
-const sortedKeysSet = new Set();
-for (const sm of subMaps) {
-    for (const key of sm.keys()) {
-        sortedKeysSet.add(key);
-    }
-}
-
-const sortedKeys = [...sortedKeysSet].sort();
-for (const key of sortedKeys) {
-    let val = null;
-    for (const sm of subMaps) {
-        if (!sm.has(key)) continue;
-        if (!val) {
-            val = sm.get(key);
-            continue;
-        }
-        const subMapItem = sm.get(key);
-        val = {
-            min: Math.min(val.min, subMapItem.min),
-            max: Math.max(val.max, subMapItem.max),
-            sum: val.sum + subMapItem.sum,
-            total: val.total + subMapItem.total,
-        };
-    }
-
-    // print result
+for (const key of [...mergeMap.keys()].sort()) {
+    const val = mergeMap.get(key);
     process.stdout.write(
         `${key}=${val.min}/${(val.sum / val.total).toFixed(1)}/${val.max}, `,
     );
