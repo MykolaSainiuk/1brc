@@ -1,9 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
-	"io"
+
 	"log"
 	"os"
 	"sort"
@@ -13,7 +14,7 @@ import (
 
 const (
 	// CHUNK_SIZE_IN_BYTES int64 = int64(float32(0.45 * 1024 * 1024 * 1024)) // 450MB -> works ugly
-	CHUNK_SIZE_IN_BYTES int64 = int64(16 * 1024 * 1024) // 16MB
+	CHUNK_SIZE_IN_BYTES int = 16 * 1024 * 1024 // 16MB
 	// NUM_OF_WORKERS      int   = 160
 )
 
@@ -42,11 +43,11 @@ func main() {
 		return
 	}
 
-	var numberOfWorkers int = int(size/CHUNK_SIZE_IN_BYTES) + 1
+	var numberOfWorkers int = int(int(size)/CHUNK_SIZE_IN_BYTES) + 1
 	var chunkSize int = int(CHUNK_SIZE_IN_BYTES)
 	// var numberOfWorkers int = NUM_OF_WORKERS
 	// var chunkSize int = int(size / int64(numberOfWorkers))
-	
+
 	pln("numberOfWorkers:", numberOfWorkers)
 	// a channel of maps of partial parse results
 	var channel chan map[string]MapElem = make(chan map[string]MapElem, numberOfWorkers)
@@ -118,59 +119,33 @@ func openFile(path string) (*os.File, int64, error) {
 }
 
 func parseFile(file *os.File, offset int64, chunkSize int, channel chan map[string]MapElem, errChan chan error) {
-	var err error
-	var buffer []byte = make([]byte, chunkSize)
-	var bytesRead int
-
-	bytesRead, err = file.ReadAt(buffer, offset)
-	if err != nil && err != io.EOF {
-		errChan <- err
-		return
-	}
-	if bytesRead == 0 {
-		errChan <- errNothingToRead
-		return
-	}
+	// var content []byte = buffer[:bytesRead]
+	var reader *bufio.Reader = bufio.NewReaderSize(file, int(CHUNK_SIZE_IN_BYTES))
+	reader.Discard(int(offset))
+	var fileScanner *bufio.Scanner = bufio.NewScanner(reader)
+	// fileScanner.Buffer(buffer[:bytesRead])
+	fileScanner.Split(bufio.ScanLines)
 
 	var subMap map[string]MapElem = make(map[string]MapElem)
+	var line string
 
-	var content string = string(buffer[:bytesRead])
-	var lines []string = strings.Split(content, "\n")
-
-	var l int = len(lines)
-	var ll int = l - 1
-	var leftover string = ""
-
-	for i := 0; i < l; i++ {
-		var line string
-		if i > 0 && i < ll {
-			line = lines[i]
-		} else if i == 0 {
-			if leftover != "" {
-				line = leftover + lines[0]
-			} else {
-				line = lines[0]
-			}
-		} else if i == ll {
-			leftover = lines[i]
-			break
-		}
+	for i := 0; fileScanner.Scan(); i++ {
+		line = fileScanner.Text()
 
 		var lineParts []string = strings.Split(line, ";")
 		if len(lineParts) != 2 || lineParts[0] == "" || lineParts[1] == "" {
-			// leftover = line // ???
 			continue
 		}
+		// else if i == 0 {
+		// 	println("lost content 1: ", line)
+		// }
 
 		processLine(subMap, lineParts[0], lineParts[1])
 	}
 
-	if leftover != "" {
-		var lineParts []string = strings.Split(leftover, ";")
-		if len(lineParts) == 2 && lineParts[0] != "" && lineParts[1] != "" {
-			processLine(subMap, lineParts[0], lineParts[1])
-		}
-		// TODO: BUG?
+	var lineParts []string = strings.Split(line, ";")
+	if len(lineParts) == 2 && lineParts[0] != "" && lineParts[1] != "" {
+		processLine(subMap, lineParts[0], lineParts[1])
 	}
 
 	channel <- subMap
@@ -181,14 +156,12 @@ func processLine(subMap map[string]MapElem, key string, value string) {
 	var val float64
 	val, err = strconv.ParseFloat(value, 32)
 	if err != nil {
-		// TODO: BUG?
+		// println("lost content 2: ", value)
 		return
 	}
 	var fv float32 = float32(val)
-	var el MapElem
-	var ok bool
 
-	el, ok = subMap[key]
+	el, ok := subMap[key]
 	if ok {
 		el.min = min(el.min, fv)
 		el.max = max(el.max, fv)
@@ -207,5 +180,4 @@ func processLine(subMap map[string]MapElem, key string, value string) {
 var (
 	errorCannotOpenFileToRead    = errors.New("cannot open file to read")
 	errorCannotFetchFileMetadata = errors.New("cannot read file metadata")
-	errNothingToRead             = errors.New("nothing left to read")
 )
