@@ -2,14 +2,16 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"errors"
 	"fmt"
-
 	"log"
 	"os"
-	"sort"
+	"slices"
+	// "sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -25,6 +27,12 @@ type MapElem struct {
 	max   float32
 	sum   float32
 	count int
+}
+
+var MapElemsPool = sync.Pool{
+	New: func() interface{} {
+		return &MapElem{}
+	},
 }
 
 func main() {
@@ -61,19 +69,19 @@ func main() {
 	}
 
 	var mergedMap map[string]MapElem = make(map[string]MapElem)
-	var i int = 0
-	for i < numberOfWorkers {
+
+	for i := 0; i < numberOfWorkers; i++ {
 		select {
 		case subMap := <-channel:
-			for k, v := range subMap {
+			for k := range subMap {
 				el, ok := mergedMap[k]
 				if ok {
-					el.min = min(el.min, v.min)
-					el.max = max(el.max, v.max)
-					el.sum += v.sum
-					el.count += v.count
+					el.min = min(el.min, subMap[k].min)
+					el.max = max(el.max, subMap[k].max)
+					el.sum += subMap[k].sum
+					el.count += subMap[k].count
 				} else {
-					mergedMap[k] = v
+					mergedMap[k] = subMap[k]
 				}
 			}
 		case err := <-firstErrChan:
@@ -81,7 +89,6 @@ func main() {
 			log.Fatal(err)
 			return
 		}
-		i++
 	}
 
 	close(channel)
@@ -90,9 +97,10 @@ func main() {
 	// get sorted sortedKeys
 	var sortedKeys []string = make([]string, 0, len(mergedMap))
 	for k := range mergedMap {
-		sortedKeys = append(sortedKeys, k)
+		// sortedKeys = append(sortedKeys, k)
+		sortedKeys = Insert(sortedKeys, k)
 	}
-	sort.Strings(sortedKeys)
+	// sort.Strings(sortedKeys)
 
 	// print results
 	for _, k := range sortedKeys {
@@ -151,6 +159,11 @@ func parseFile(file *os.File, offset int64, chunkSize int, channel chan map[stri
 	channel <- subMap
 }
 
+func Insert[T cmp.Ordered](ts []T, t T) []T {
+    i, _ := slices.BinarySearch(ts, t) // find slot
+    return slices.Insert(ts, i, t)
+}
+
 func processLine(subMap map[string]MapElem, key string, value string) {
 	var err error
 	var val float64
@@ -168,12 +181,15 @@ func processLine(subMap map[string]MapElem, key string, value string) {
 		el.sum += fv
 		el.count++
 	} else {
-		subMap[key] = MapElem{
-			min:   fv,
-			max:   fv,
-			sum:   fv,
-			count: 1,
-		}
+		memPool := MapElemsPool.Get().(*MapElem)
+		memPool.min = fv
+		memPool.max = fv
+		memPool.sum = fv
+		memPool.count = 1
+
+		subMap[key] = *memPool
+
+		MapElemsPool.Put(memPool)
 	}
 }
 
