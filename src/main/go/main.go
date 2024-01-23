@@ -16,7 +16,7 @@ const (
 	// CHUNK_SIZE_IN_BYTES int64 = int64(float32(0.45 * 1024 * 1024 * 1024)) // 450MB -> works ugly
 	CHUNK_SIZE_IN_BYTES int64 = int64(16 * 1024 * 1024) // 16MB
 	NUM_OF_WORKERS      int   = 750
-	MAX_CITES_AMOUNT int = 1e4 // 10000
+	MAX_CITES_AMOUNT    int   = 1e4 // 10000
 )
 
 var pln = fmt.Println
