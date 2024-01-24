@@ -5,13 +5,13 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"slices"
-	// "sort"
 	"strconv"
 	"strings"
-	"sync"
+	"unicode"
 )
 
 const (
@@ -29,11 +29,11 @@ type MapElem struct {
 	count int
 }
 
-var MapElemsPool = sync.Pool{
-	New: func() interface{} {
-		return &MapElem{}
-	},
-}
+// var MapElemsPool = sync.Pool{
+// 	New: func() interface{} {
+// 		return &MapElem{}
+// 	},
+// }
 
 func main() {
 	args := os.Args[1:]
@@ -80,6 +80,7 @@ func main() {
 					el.max = max(el.max, subMap[k].max)
 					el.sum += subMap[k].sum
 					el.count += subMap[k].count
+					mergedMap[k] = el
 				} else {
 					mergedMap[k] = subMap[k]
 				}
@@ -127,11 +128,13 @@ func openFile(path string) (*os.File, int64, error) {
 }
 
 func parseFile(file *os.File, offset int64, chunkSize int, channel chan map[string]MapElem, errChan chan error) {
-	// var content []byte = buffer[:bytesRead]
-	var reader *bufio.Reader = bufio.NewReaderSize(file, int(CHUNK_SIZE_IN_BYTES))
-	reader.Discard(int(offset))
-	var fileScanner *bufio.Scanner = bufio.NewScanner(reader)
-	// fileScanner.Buffer(buffer[:bytesRead])
+	var shifterBackOffset int64 = 0
+	if offset > 0 {
+		shifterBackOffset = offset - 30*4 // 30 runes is enough to cover the longest prev row
+		// with shifterBackOffset 30 runes back we're safe to skip first invalid line if there is such
+	}
+	var separateSectionReader *io.SectionReader = io.NewSectionReader(file, shifterBackOffset, int64(chunkSize))
+	var fileScanner *bufio.Scanner = bufio.NewScanner(separateSectionReader)
 	fileScanner.Split(bufio.ScanLines)
 
 	var subMap map[string]MapElem = make(map[string]MapElem)
@@ -141,27 +144,21 @@ func parseFile(file *os.File, offset int64, chunkSize int, channel chan map[stri
 		line = fileScanner.Text()
 
 		var lineParts []string = strings.Split(line, ";")
-		if len(lineParts) != 2 || lineParts[0] == "" || lineParts[1] == "" {
-			continue
+		if len(lineParts) == 2 && lineParts[0] != "" && lineParts[1] != "" && unicode.IsUpper([]rune(lineParts[0])[0]) {
+			// if !unicode.IsUpper([]rune(lineParts[0])[0]) {
+			// 	// fmt.Printf("b_sht %d: %s\n", i, line)
+			// 	continue
+			// }
+			processLine(subMap, lineParts[0], lineParts[1])
 		}
-		// else if i == 0 {
-		// 	println("lost content 1: ", line)
-		// }
-
-		processLine(subMap, lineParts[0], lineParts[1])
-	}
-
-	var lineParts []string = strings.Split(line, ";")
-	if len(lineParts) == 2 && lineParts[0] != "" && lineParts[1] != "" {
-		processLine(subMap, lineParts[0], lineParts[1])
 	}
 
 	channel <- subMap
 }
 
 func Insert[T cmp.Ordered](ts []T, t T) []T {
-    i, _ := slices.BinarySearch(ts, t) // find slot
-    return slices.Insert(ts, i, t)
+	i, _ := slices.BinarySearch(ts, t) // find slot
+	return slices.Insert(ts, i, t)
 }
 
 func processLine(subMap map[string]MapElem, key string, value string) {
@@ -180,20 +177,23 @@ func processLine(subMap map[string]MapElem, key string, value string) {
 		el.max = max(el.max, fv)
 		el.sum += fv
 		el.count++
+		subMap[key] = el
 	} else {
-		memPool := MapElemsPool.Get().(*MapElem)
-		memPool.min = fv
-		memPool.max = fv
-		memPool.sum = fv
-		memPool.count = 1
+		// memPool := MapElemsPool.Get().(*MapElem)
+		// memPool.min = fv
+		// memPool.max = fv
+		// memPool.sum = fv
+		// memPool.count = 1
 
-		subMap[key] = *memPool
+		// subMap[key] = *memPool
 
-		MapElemsPool.Put(memPool)
+		// MapElemsPool.Put(memPool)
+		subMap[key] = MapElem{min: fv, max: fv, sum: fv, count: 1}
 	}
 }
 
 var (
 	errorCannotOpenFileToRead    = errors.New("cannot open file to read")
 	errorCannotFetchFileMetadata = errors.New("cannot read file metadata")
+	// errNothingToRead             = errors.New("nothing left to read")
 )
