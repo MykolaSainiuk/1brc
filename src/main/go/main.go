@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
 	"errors"
 	"fmt"
@@ -10,8 +11,9 @@ import (
 	"os"
 	"slices"
 	"strconv"
-	"strings"
+	"sync"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -20,6 +22,7 @@ const (
 	// NUM_OF_WORKERS      int   = 160
 )
 
+var lineSeparator []byte = []byte(";")
 var pln = fmt.Println
 
 type MapElem struct {
@@ -29,11 +32,11 @@ type MapElem struct {
 	count int
 }
 
-// var MapElemsPool = sync.Pool{
-// 	New: func() interface{} {
-// 		return &MapElem{}
-// 	},
-// }
+var MapElemsPool = sync.Pool{
+	New: func() interface{} {
+		return &MapElem{}
+	},
+}
 
 func main() {
 	args := os.Args[1:]
@@ -138,18 +141,21 @@ func parseFile(file *os.File, offset int64, chunkSize int, channel chan map[stri
 	fileScanner.Split(bufio.ScanLines)
 
 	var subMap map[string]MapElem = make(map[string]MapElem)
-	var line string
 
 	for i := 0; fileScanner.Scan(); i++ {
-		line = fileScanner.Text()
+		line := fileScanner.Bytes()
+		lineParts := bytes.Split(line, lineSeparator)
 
-		var lineParts []string = strings.Split(line, ";")
-		if len(lineParts) == 2 && lineParts[0] != "" && lineParts[1] != "" && unicode.IsUpper([]rune(lineParts[0])[0]) {
+		// var lineParts []string = strings.Split(line, ";")
+		if len(lineParts) == 2 {
 			// if !unicode.IsUpper([]rune(lineParts[0])[0]) {
 			// 	// fmt.Printf("b_sht %d: %s\n", i, line)
 			// 	continue
 			// }
-			processLine(subMap, lineParts[0], lineParts[1])
+			r, _ := utf8.DecodeRune(lineParts[0])
+			if unicode.IsUpper(r) {
+				processLine(subMap, string(lineParts[0]), string(lineParts[1]))
+			}
 		}
 	}
 
@@ -179,16 +185,16 @@ func processLine(subMap map[string]MapElem, key string, value string) {
 		el.count++
 		subMap[key] = el
 	} else {
-		// memPool := MapElemsPool.Get().(*MapElem)
-		// memPool.min = fv
-		// memPool.max = fv
-		// memPool.sum = fv
-		// memPool.count = 1
+		memPool := MapElemsPool.Get().(*MapElem)
+		memPool.min = fv
+		memPool.max = fv
+		memPool.sum = fv
+		memPool.count = 1
 
-		// subMap[key] = *memPool
+		subMap[key] = *memPool
 
-		// MapElemsPool.Put(memPool)
-		subMap[key] = MapElem{min: fv, max: fv, sum: fv, count: 1}
+		MapElemsPool.Put(memPool)
+		// subMap[key] = MapElem{min: fv, max: fv, sum: fv, count: 1}
 	}
 }
 
