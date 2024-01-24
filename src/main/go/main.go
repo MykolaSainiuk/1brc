@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"cmp"
 	"errors"
@@ -22,7 +21,8 @@ const (
 	// NUM_OF_WORKERS      int   = 160
 )
 
-var lineSeparator []byte = []byte(";")
+var NEWLINE_SEP []byte = []byte("\n")
+var COMMA_DOT_SEP []byte = []byte(";")
 var pln = fmt.Println
 
 type MapElem struct {
@@ -136,17 +136,28 @@ func parseFile(file *os.File, offset int64, chunkSize int, channel chan map[stri
 		shifterBackOffset = offset - 30*4 // 30 runes is enough to cover the longest prev row
 		// with shifterBackOffset 30 runes back we're safe to skip first invalid line if there is such
 	}
-	var separateSectionReader *io.SectionReader = io.NewSectionReader(file, shifterBackOffset, int64(chunkSize))
-	var fileScanner *bufio.Scanner = bufio.NewScanner(separateSectionReader)
-	fileScanner.Split(bufio.ScanLines)
 
-	var subMap map[string]MapElem = make(map[string]MapElem)
+	var err error
+	var buffer []byte = make([]byte, CHUNK_SIZE_IN_BYTES)
+	var bytesRead int
 
-	for i := 0; fileScanner.Scan(); i++ {
-		line := fileScanner.Bytes()
-		lineParts := bytes.Split(line, lineSeparator)
+	bytesRead, err = file.ReadAt(buffer, shifterBackOffset)
+	if err != nil && err != io.EOF {
+		errChan <- err
+		return
+	}
+	if bytesRead == 0 {
+		errChan <- errNothingToRead
+		return
+	}
 
-		// var lineParts []string = strings.Split(line, ";")
+	lines := bytes.Split(buffer[:bytesRead], NEWLINE_SEP)
+	l := len(lines)
+	subMap := make(map[string]MapElem, l)
+
+	for i := 0; i < l; i++ {
+		lineParts := bytes.Split(lines[i], COMMA_DOT_SEP)
+
 		if len(lineParts) == 2 {
 			// if !unicode.IsUpper([]rune(lineParts[0])[0]) {
 			// 	// fmt.Printf("b_sht %d: %s\n", i, line)
@@ -201,5 +212,5 @@ func processLine(subMap map[string]MapElem, key string, value string) {
 var (
 	errorCannotOpenFileToRead    = errors.New("cannot open file to read")
 	errorCannotFetchFileMetadata = errors.New("cannot read file metadata")
-	// errNothingToRead             = errors.New("nothing left to read")
+	errNothingToRead             = errors.New("nothing left to read")
 )
