@@ -11,6 +11,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -44,6 +45,8 @@ func main() {
 	}
 	var filename string = args[0]
 	pln("filename: ", filename)
+
+	// pprof
 
 	// read file metadata
 	file, size, err := openFile(filename)
@@ -110,11 +113,12 @@ func main() {
 	// sort.Strings(sortedKeys)
 
 	// print results
+	var sb strings.Builder
 	for _, k := range sortedKeys {
-		v := mergedMap[k]
-		fmt.Printf("%s=%.1f/%.1f/%.1f, ", k, v.min, v.sum/float32(v.count), v.max)
+		sb.Write(fmt.Appendf(nil, "%s=%.1f/%.1f/%.1f, ", k, mergedMap[k].min, mergedMap[k].sum/float32(mergedMap[k].count), mergedMap[k].max))
+		// sb.WriteString(fmt.Sprintf("%s=%.1f/%.1f/%.1f, ", k, mergedMap[k].min, mergedMap[k].sum/float32(mergedMap[k].count), mergedMap[k].max))
 	}
-	pln()
+	pln(sb.String())
 }
 
 func openFile(path string) (*os.File, int64, error) {
