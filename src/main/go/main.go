@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
 	"errors"
 	"fmt"
@@ -10,8 +11,8 @@ import (
 	"os"
 	"slices"
 	"strconv"
-	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -61,6 +62,11 @@ func main() {
 	var channel chan map[string]MapElem = make(chan map[string]MapElem, numberOfWorkers)
 	var firstErrChan chan error = make(chan error, 1)
 
+	defer func() {
+		close(channel)
+		file.Close()
+	}()
+
 	var offset int64
 	for i := 0; i < numberOfWorkers; i++ {
 		offset = int64(i) * int64(chunkSize)
@@ -86,15 +92,15 @@ func main() {
 				}
 			}
 		case err := <-firstErrChan:
-			file.Close()
+			// file.Close()
 			log.Fatal(err)
 			return
 		}
 	}
+	// close(channel)
+	// file.Close()
 
-	close(channel)
-	file.Close()
-
+	pln("mergedMap size: ", len(mergedMap))
 	// get sorted sortedKeys
 	var sortedKeys []string = make([]string, 0, len(mergedMap))
 	for k := range mergedMap {
@@ -138,18 +144,17 @@ func parseFile(file *os.File, offset int64, chunkSize int, channel chan map[stri
 	fileScanner.Split(bufio.ScanLines)
 
 	var subMap map[string]MapElem = make(map[string]MapElem)
-	var line string
+	var splitter []byte = []byte(";")
 
 	for i := 0; fileScanner.Scan(); i++ {
-		line = fileScanner.Text()
+		line := fileScanner.Bytes()
 
-		var lineParts []string = strings.Split(line, ";")
-		if len(lineParts) == 2 && lineParts[0] != "" && lineParts[1] != "" && unicode.IsUpper([]rune(lineParts[0])[0]) {
-			// if !unicode.IsUpper([]rune(lineParts[0])[0]) {
-			// 	// fmt.Printf("b_sht %d: %s\n", i, line)
-			// 	continue
-			// }
-			processLine(subMap, lineParts[0], lineParts[1])
+		var lineParts [][]byte = bytes.Split(line, splitter)
+		if len(lineParts) == 2 && len(lineParts[0]) != 0 && len(lineParts[1]) != 0 {
+			r, _ := utf8.DecodeRune(lineParts[0])
+			if unicode.IsUpper(r) {
+				processLine(subMap, string(lineParts[0]), string(lineParts[1]))
+			}
 		}
 	}
 
