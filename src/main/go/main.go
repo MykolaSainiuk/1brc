@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"cmp"
 	"errors"
@@ -10,20 +11,26 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"unicode"
 	"unicode/utf8"
+
+	"onebrc/gopool"
 )
 
 const (
 	// CHUNK_SIZE_IN_BYTES int64 = int64(float32(0.45 * 1024 * 1024 * 1024)) // 450MB -> works ugly
-	CHUNK_SIZE_IN_BYTES int = 16 * 1024 * 1024 // 16MB
+	CHUNK_SIZE_IN_BYTES     int = 16 * 1024 * 1024 // 16MB
+	GOROUTINES_LOAD_PERCENT int = 20
 	// NUM_OF_WORKERS      int   = 160
 )
 
-var NEWLINE_SEP []byte = []byte("\n")
 var COMMA_DOT_SEP []byte = []byte(";")
+
 var pln = fmt.Println
+
+var mergedMap map[string]MapElem = make(map[string]MapElem)
 
 type MapElem struct {
 	min   float32
@@ -37,6 +44,13 @@ var MapElemsPool = sync.Pool{
 		return &MapElem{}
 	},
 }
+
+// var ChunkBufferPool = sync.Pool{
+// 	New: func() interface{} {
+// 		s := make([]byte, CHUNK_SIZE_IN_BYTES)
+// 		return &s
+// 	},
+// }
 
 func main() {
 	args := os.Args[1:]
@@ -62,42 +76,26 @@ func main() {
 	pln("numberOfWorkers:", numberOfWorkers)
 	// a channel of maps of partial parse results
 	var channel chan map[string]MapElem = make(chan map[string]MapElem, numberOfWorkers)
-	var firstErrChan chan error = make(chan error, 1)
+	defer func() {
+		close(channel)
+		file.Close()
+	}()
 
+	var offsetChan chan int64 = make(chan int64, numberOfWorkers)
 	var offset int64
 	for i := 0; i < numberOfWorkers; i++ {
 		offset = int64(i) * int64(chunkSize)
-
-		go parseFile(file, offset, chunkSize, channel, firstErrChan)
+		offsetChan <- offset
 	}
 
-	var mergedMap map[string]MapElem = make(map[string]MapElem)
+	perIterN := int(float32(numberOfWorkers)*float32(GOROUTINES_LOAD_PERCENT)/100) + 1
+	pln("running %s goroutines simultaneously", perIterN)
 
-	for i := 0; i < numberOfWorkers; i++ {
-		select {
-		case subMap := <-channel:
-			for k := range subMap {
-				el, ok := mergedMap[k]
-				if ok {
-					el.min = min(el.min, subMap[k].min)
-					el.max = max(el.max, subMap[k].max)
-					el.sum += subMap[k].sum
-					el.count += subMap[k].count
-					mergedMap[k] = el
-				} else {
-					mergedMap[k] = subMap[k]
-				}
-			}
-		case err := <-firstErrChan:
-			file.Close()
-			log.Fatal(err)
-			return
-		}
-	}
+	gp := gopool.NewPool(numberOfWorkers, perIterN)
+	gp.Run(parseFile2, mergeMaps, file, offsetChan, chunkSize, channel)
+	gp.Await()
 
-	close(channel)
-	file.Close()
-
+	pln("mergedMap size: ", len(mergedMap))
 	// get sorted sortedKeys
 	var sortedKeys []string = make([]string, 0, len(mergedMap))
 	for k := range mergedMap {
@@ -107,11 +105,11 @@ func main() {
 	// sort.Strings(sortedKeys)
 
 	// print results
+	var sb strings.Builder
 	for _, k := range sortedKeys {
-		v := mergedMap[k]
-		fmt.Printf("%s=%.1f/%.1f/%.1f, ", k, v.min, v.sum/float32(v.count), v.max)
+		sb.Write(fmt.Appendf(nil, "%s=%.1f/%.1f/%.1f, ", k, mergedMap[k].min, mergedMap[k].sum/float32(mergedMap[k].count), mergedMap[k].max))
 	}
-	pln()
+	pln(sb.String())
 }
 
 func openFile(path string) (*os.File, int64, error) {
@@ -126,43 +124,33 @@ func openFile(path string) (*os.File, int64, error) {
 		pln(err)
 		return nil, 0, errorCannotFetchFileMetadata
 	}
+
 	pln("file size (bytes): ", fileInfo.Size())
 	return file, fileInfo.Size(), nil
 }
 
-func parseFile(file *os.File, offset int64, chunkSize int, channel chan map[string]MapElem, errChan chan error) {
+func parseFile2(params ...any) {
+	file := params[0].(*os.File)
+	offsetChan := params[1].(chan int64)
+	chunkSize := params[2].(int)
+	channel := params[3].(chan map[string]MapElem)
+
+	offset := <-offsetChan
 	var shifterBackOffset int64 = 0
 	if offset > 0 {
 		shifterBackOffset = offset - 30*4 // 30 runes is enough to cover the longest prev row
 		// with shifterBackOffset 30 runes back we're safe to skip first invalid line if there is such
 	}
 
-	var err error
-	var buffer []byte = make([]byte, CHUNK_SIZE_IN_BYTES)
-	var bytesRead int
+	var separateSectionReader *io.SectionReader = io.NewSectionReader(file, shifterBackOffset, int64(chunkSize))
+	var fileScanner *bufio.Scanner = bufio.NewScanner(separateSectionReader)
+	fileScanner.Split(bufio.ScanLines)
 
-	bytesRead, err = file.ReadAt(buffer, shifterBackOffset)
-	if err != nil && err != io.EOF {
-		errChan <- err
-		return
-	}
-	if bytesRead == 0 {
-		errChan <- errNothingToRead
-		return
-	}
-
-	lines := bytes.Split(buffer[:bytesRead], NEWLINE_SEP)
-	l := len(lines)
-	subMap := make(map[string]MapElem, l)
-
-	for i := 0; i < l; i++ {
-		lineParts := bytes.Split(lines[i], COMMA_DOT_SEP)
+	subMap := make(map[string]MapElem)
+	for i := 0; fileScanner.Scan(); i++ {
+		lineParts := bytes.Split(fileScanner.Bytes(), COMMA_DOT_SEP)
 
 		if len(lineParts) == 2 {
-			// if !unicode.IsUpper([]rune(lineParts[0])[0]) {
-			// 	// fmt.Printf("b_sht %d: %s\n", i, line)
-			// 	continue
-			// }
 			r, _ := utf8.DecodeRune(lineParts[0])
 			if unicode.IsUpper(r) {
 				processLine(subMap, string(lineParts[0]), string(lineParts[1]))
@@ -173,17 +161,40 @@ func parseFile(file *os.File, offset int64, chunkSize int, channel chan map[stri
 	channel <- subMap
 }
 
+func mergeMaps(subMapsToIter int, params ...any) {
+	channel := params[3].(chan map[string]MapElem)
+
+	for i := 0; i < subMapsToIter; i++ {
+		select {
+		case subMap := <-channel:
+			for k := range subMap {
+				el, ok := mergedMap[k]
+				if ok {
+					el.min = min(el.min, subMap[k].min)
+					el.max = max(el.max, subMap[k].max)
+					el.sum += subMap[k].sum
+					el.count += subMap[k].count
+					mergedMap[k] = el
+				} else {
+					mergedMap[k] = subMap[k]
+				}
+			}
+		default:
+			log.Fatal("no subMap to merge but expected")
+		}
+	}
+}
+
 func Insert[T cmp.Ordered](ts []T, t T) []T {
 	i, _ := slices.BinarySearch(ts, t) // find slot
 	return slices.Insert(ts, i, t)
 }
 
 func processLine(subMap map[string]MapElem, key string, value string) {
-	var err error
 	var val float64
-	val, err = strconv.ParseFloat(value, 32)
+	val, err := strconv.ParseFloat(value, 32)
 	if err != nil {
-		// println("lost content 2: ", value)
+		// pln("[ZYskipped str] error parsing float: ", err)
 		return
 	}
 	var fv float32 = float32(val)
