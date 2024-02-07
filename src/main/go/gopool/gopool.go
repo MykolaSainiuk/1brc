@@ -1,6 +1,9 @@
 package gopool
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 type GoroutinesPool struct {
 	totalRoundsCount  int
@@ -25,7 +28,7 @@ func (gp *GoroutinesPool) Run(eachIterFunc func(...any), eachRoundFunc func(int,
 		j := 0
 		for ; j < gp.countPerIteration && i < gp.totalRoundsCount; j++ {
 			wg.Add(1)
-			
+
 			go func(_wg *sync.WaitGroup) {
 				eachIterFunc(args...)
 				_wg.Done()
@@ -34,7 +37,7 @@ func (gp *GoroutinesPool) Run(eachIterFunc func(...any), eachRoundFunc func(int,
 			i++
 		}
 
-		println("in progress...", j, "goroutines to finish OF", i, "total:", gp.totalRoundsCount)
+		fmt.Println("progress...", j, "goroutines to finish of", i, "total:", gp.totalRoundsCount)
 		wg.Wait()
 
 		if eachRoundFunc != nil {

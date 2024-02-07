@@ -9,10 +9,10 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -39,12 +39,11 @@ type MapElem struct {
 	count int
 }
 
-var MapElemsPool = sync.Pool{
-	New: func() interface{} {
-		return &MapElem{}
-	},
-}
-
+// var MapElemsPool = sync.Pool{
+// 	New: func() interface{} {
+// 		return &MapElem{}
+// 	},
+// }
 // var ChunkBufferPool = sync.Pool{
 // 	New: func() interface{} {
 // 		s := make([]byte, CHUNK_SIZE_IN_BYTES)
@@ -53,6 +52,7 @@ var MapElemsPool = sync.Pool{
 // }
 
 func main() {
+	pln("logical processors: ", runtime.NumCPU())
 	args := os.Args[1:]
 	if len(args) == 0 {
 		log.Fatal("Please provide a filename")
@@ -88,11 +88,20 @@ func main() {
 		offsetChan <- offset
 	}
 
-	perIterN := int(float32(numberOfWorkers)*float32(GOROUTINES_LOAD_PERCENT)/100) + 1
-	pln("running %s goroutines simultaneously", perIterN)
+	perIterN := int(float32(numberOfWorkers)*float32(0.1)) + 1 // 10% by default
+	if len(args) > 1 {
+		ov := perIterN
+		perIterN, err = strconv.Atoi(args[1])
+		if perIterN == 0 || err != nil {
+			perIterN = ov
+		}
+	}
+	fmt.Printf("running %d goroutines each lap\n", perIterN)
 
 	gp := gopool.NewPool(numberOfWorkers, perIterN)
+
 	gp.Run(parseFile2, mergeMaps, file, offsetChan, chunkSize, channel)
+
 	gp.Await()
 
 	pln("mergedMap size: ", len(mergedMap))
@@ -207,16 +216,16 @@ func processLine(subMap map[string]MapElem, key string, value string) {
 		el.count++
 		subMap[key] = el
 	} else {
-		memPool := MapElemsPool.Get().(*MapElem)
-		memPool.min = fv
-		memPool.max = fv
-		memPool.sum = fv
-		memPool.count = 1
+		subMap[key] = MapElem{min: fv, max: fv, sum: fv, count: 1}
+		// memPool := MapElemsPool.Get().(*MapElem)
+		// memPool.min = fv
+		// memPool.max = fv
+		// memPool.sum = fv
+		// memPool.count = 1
 
-		subMap[key] = *memPool
+		// subMap[key] = *memPool
 
-		MapElemsPool.Put(memPool)
-		// subMap[key] = MapElem{min: fv, max: fv, sum: fv, count: 1}
+		// MapElemsPool.Put(memPool)
 	}
 }
 
